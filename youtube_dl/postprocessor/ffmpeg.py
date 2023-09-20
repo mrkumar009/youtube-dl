@@ -7,12 +7,12 @@ import re
 
 
 from .common import AudioConversionError, PostProcessor
-
 from ..compat import compat_open as open
 from ..utils import (
     encodeArgument,
     encodeFilename,
     get_exe_version,
+    hyphenate_date,
     is_outdated_version,
     PostProcessingError,
     prepend_extension,
@@ -292,6 +292,8 @@ class FFmpegExtractAudioPP(FFmpegPostProcessor):
                     more_opts = ['-f', 'adts']
                 if filecodec == 'vorbis':
                     extension = 'ogg'
+                if filecodec == 'opus':
+                    extension = 'ogg'
             else:
                 # MP3 otherwise.
                 acodec = 'libmp3lame'
@@ -318,6 +320,8 @@ class FFmpegExtractAudioPP(FFmpegPostProcessor):
             if self._preferredcodec == 'm4a':
                 more_opts += ['-bsf:a', 'aac_adtstoasc']
             if self._preferredcodec == 'vorbis':
+                extension = 'ogg'
+            if self._preferredcodec == 'opus':
                 extension = 'ogg'
             if self._preferredcodec == 'wav':
                 extension = 'wav'
@@ -459,14 +463,16 @@ class FFmpegMetadataPP(FFmpegPostProcessor):
         # 4. http://atomicparsley.sourceforge.net/mpeg-4files.html
 
         add('title', ('track', 'title'))
-        add('date', 'upload_date')
-        add(('description', 'comment'), 'description')
+        add('date', ('release_date', 'upload_date'))
+        #add(('description', 'comment'), 'description')
         add('purl', 'webpage_url')
         add('track', 'track_number')
         add('artist', ('artist', 'creator', 'uploader', 'uploader_id'))
         add('genre')
         add('album')
         add('album_artist')
+        add('copyright')
+        add('publisher')
         add('disc', 'disc_number')
         add('show', 'series')
         add('season_number')
@@ -482,18 +488,45 @@ class FFmpegMetadataPP(FFmpegPostProcessor):
         in_filenames = [filename]
         options = []
 
-        if info['ext'] == 'm4a':
+        if info['ext'] in ['m4a', 'ogg']:
             options.extend(['-vn', '-acodec', 'copy'])
         else:
             options.extend(['-c', 'copy'])
 
         for (name, value) in metadata.items():
-            options.extend(['-metadata', '%s=%s' % (name, value)])
+            if name == 'date':
+                value = hyphenate_date(value)
+                options.extend(['-metadata', '%s=%s' % (name, value)])
+            else:
+                options.extend(['-metadata', '%s=%s' % (name, value)])
+            l = re.findall(r'(?P<tag>[^\n:]+)\s*:\s*(?P<meta>[^\n]+)', info['description'])
+            d = {}
+            for k,v in l:
+                if k == 'Released on':
+                    pass
+                elif k.startswith(info['track']):
+                    pass
+                elif d.get(k) is not None:
+                    d.update([(k, d[k] + ', ' + v)])
+                else:
+                    d[k] = v
+            nd = {}
+            for k, v in d.items():
+                if k.find(', ') == -1:
+                    nd[k] = v
+                else:
+                    for nk in k.split(', '):
+                        if nd.get(nk) is not None:
+                            nd.update([(nk, nd[nk] + ', ' + v)])
+                        else:
+                            nd[nk] = v
+            for (tag, meta) in nd.items():
+                options.extend(['-metadata', '%s=%s' %(tag, meta)])
 
         chapters = info.get('chapters', [])
         if chapters:
             metadata_filename = replace_extension(filename, 'meta')
-            with open(metadata_filename, 'w', encoding='utf-8') as f:
+            with open(metadata_filename, 'wt', encoding='utf-8') as f:
                 def ffmpeg_escape(text):
                     return re.sub(r'(=|;|#|\\|\n)', r'\\\1', text)
 
@@ -636,7 +669,7 @@ class FFmpegSubtitlesConvertorPP(FFmpegPostProcessor):
                 with open(dfxp_file, 'rb') as f:
                     srt_data = dfxp2srt(f.read())
 
-                with open(srt_file, 'w', encoding='utf-8') as f:
+                with open(srt_file, 'wt', encoding='utf-8') as f:
                     f.write(srt_data)
                 old_file = srt_file
 
@@ -652,7 +685,7 @@ class FFmpegSubtitlesConvertorPP(FFmpegPostProcessor):
 
             self.run_ffmpeg(old_file, new_file, ['-f', new_format])
 
-            with open(new_file, 'r', encoding='utf-8') as f:
+            with open(new_file, 'rt', encoding='utf-8') as f:
                 subs[lang] = {
                     'ext': new_ext,
                     'data': f.read(),

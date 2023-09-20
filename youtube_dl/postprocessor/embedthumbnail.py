@@ -2,8 +2,15 @@
 from __future__ import unicode_literals
 
 
+import base64
 import os
+import struct
+import re
 import subprocess
+
+from mutagen.flac import FLAC, Picture
+from mutagen.oggvorbis import OggVorbis
+from mutagen.oggopus import OggOpus
 
 from .ffmpeg import FFmpegPostProcessor
 
@@ -17,9 +24,7 @@ from ..utils import (
     replace_extension,
     shell_quote,
 )
-
 from ..compat import compat_open as open
-
 
 class EmbedThumbnailPPError(PostProcessingError):
     pass
@@ -63,19 +68,52 @@ class EmbedThumbnailPP(FFmpegPostProcessor):
                 thumbnail_ext = 'webp'
 
         # Convert unsupported thumbnail formats to JPEG (see #25687, #25717)
-        if thumbnail_ext not in ['jpg', 'png']:
+        if thumbnail_ext:
             # NB: % is supposed to be escaped with %% but this does not work
             # for input files so working around with standard substitution
             escaped_thumbnail_filename = thumbnail_filename.replace('%', '#')
             os.rename(encodeFilename(thumbnail_filename), encodeFilename(escaped_thumbnail_filename))
-            escaped_thumbnail_jpg_filename = replace_extension(escaped_thumbnail_filename, 'jpg')
-            self._downloader.to_screen('[ffmpeg] Converting thumbnail "%s" to JPEG' % escaped_thumbnail_filename)
-            self.run_ffmpeg(escaped_thumbnail_filename, escaped_thumbnail_jpg_filename, ['-bsf:v', 'mjpeg2jpeg'])
+            if thumbnail_ext not in ['jpg', 'png']:
+                escaped_thumbnail_jpg_filename = replace_extension(escaped_thumbnail_filename, 'jpg')
+            else:
+                escaped_thumbnail_jpg_filename = prepend_extension(escaped_thumbnail_filename, 'temp')
+            self._downloader.to_screen('[magick] Converting and cropping thumbnail "%s" to JPEG' % escaped_thumbnail_filename)
+            # self.run_ffmpeg(escaped_thumbnail_filename, escaped_thumbnail_jpg_filename, ['-bsf:v', 'mjpeg2jpeg'])
+            magick = next((x
+                      for x in ['magick', 'magick']
+                      if check_executable(x, ['-v'])), None)
+
+            if magick is None:
+                raise EmbedThumbnailPPError('ImageMagick was not found. Please install.')
+ 
+            cmd = [encodeFilename(magick, True),
+                   encodeArgument('convert'),
+                   encodeArgument('-crop'),
+                   encodeArgument('720x720+280+0'),
+                   encodeFilename(escaped_thumbnail_filename, True),
+                   encodeFilename(escaped_thumbnail_jpg_filename, True)]
+
+            self._downloader.to_screen('[magick] Cropping thumbnail to "%s"' % escaped_thumbnail_jpg_filename)
+
+            if self._downloader.params.get('verbose', False):
+                self._downloader.to_screen('[debug] magick command line: %s' % shell_quote(cmd))
+
+            m = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process_communicate_or_kill(m)
+
+            if m.returncode != 0:
+                msg = stderr.decode('utf-8', 'replace').strip()
+                raise EmbedThumbnailPPError(msg)
+
             os.remove(encodeFilename(escaped_thumbnail_filename))
-            thumbnail_jpg_filename = replace_extension(thumbnail_filename, 'jpg')
-            # Rename back to unescaped for further processing
-            os.rename(encodeFilename(escaped_thumbnail_jpg_filename), encodeFilename(thumbnail_jpg_filename))
-            thumbnail_filename = thumbnail_jpg_filename
+            if thumbnail_ext == 'jpg':
+                os.rename(encodeFilename(escaped_thumbnail_jpg_filename), encodeFilename(escaped_thumbnail_filename))
+                thumbnail_filename = escaped_thumbnail_filename
+            else:
+                thumbnail_jpg_filename = replace_extension(thumbnail_filename, 'jpg')
+                # Rename back to unescaped for further processing
+                os.rename(encodeFilename(escaped_thumbnail_jpg_filename), encodeFilename(thumbnail_jpg_filename))
+                thumbnail_filename = thumbnail_jpg_filename
 
         if info['ext'] == 'mp3':
             options = [
@@ -127,7 +165,34 @@ class EmbedThumbnailPP(FFmpegPostProcessor):
             else:
                 os.remove(encodeFilename(filename))
                 os.rename(encodeFilename(temp_filename), encodeFilename(filename))
+
+        elif info['ext'] in ['ogg', 'webm', 'opus']:
+            is_png = thumbnail_ext == 'png'
+            if not is_png:
+                mimetype = u"image/jpeg"
+            else:
+                mimetype = u"image/png"
+
+            file_ = OggOpus(filename)
+
+            with open(thumbnail_filename, "rb") as h:
+                data = h.read()
+
+            picture = Picture()
+            picture.data = data
+            picture.type = 3
+            picture.mime = mimetype
+            picture_data = picture.write()
+            encoded_data = base64.b64encode(picture_data)
+            vcomment_value = encoded_data.decode("ascii")
+
+            file_["metadata_block_picture"] = [vcomment_value]
+            file_.save()
+
+            if not self._already_have_thumbnail:
+                os.remove(encodeFilename(thumbnail_filename))
+
         else:
-            raise EmbedThumbnailPPError('Only mp3 and m4a/mp4 are supported for thumbnail embedding for now.')
+            raise EmbedThumbnailPPError('Only mp3, m4a/mp4 and OGG are supported for thumbnail embedding for now.')
 
         return [], info
