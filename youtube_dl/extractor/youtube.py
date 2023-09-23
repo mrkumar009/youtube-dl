@@ -2266,7 +2266,8 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
                 release_year = mobj.group('release_year')
                 release_date = mobj.group('release_date')
                 if not release_year:
-                    release_year = release_date[:4]
+                    if release_date:
+                        release_year = release_date[:4]
                 track = mobj.group('track').strip()
                 album = mobj.group('album').strip()
                 artists_list = [a.strip() for a in mobj.group('artist').split('·')]
